@@ -2,8 +2,12 @@ package com.psyagent.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.psyagent.config.RagProperties;
+import com.psyagent.dto.ChatRequest;
 import com.psyagent.dto.ChatResponse;
 import com.psyagent.dto.SourceItem;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
@@ -34,6 +38,10 @@ public class RagService {
     }
 
     public ChatResponse answer(String question, Object emotionContext) {
+        return answer(question, emotionContext, null);
+    }
+
+    public ChatResponse answer(String question, Object emotionContext, List<ChatRequest.ChatTurn> history) {
         context.clear();
         String systemPrompt = props.systemPrompt();
         String emotionCtx = normalizeEmotionContext(emotionContext);
@@ -41,11 +49,16 @@ public class RagService {
             systemPrompt += "\n\n【多模态情绪线索】" + emotionCtx
                     + "\n（请结合文本内容与情绪线索进行综合研判，但不要被情绪线索误导，以用户安全为先。）";
         }
-        String answer = chatClient.prompt()
-                .system(systemPrompt)
-                .user(question)
-                .call()
-                .content();
+        var prompt = chatClient.prompt().system(systemPrompt);
+        if (history != null && !history.isEmpty()) {
+            List<Message> messages = history.stream()
+                    .map(t -> "user".equals(t.role())
+                            ? (Message) new UserMessage(t.content())
+                            : new AssistantMessage(t.content()))
+                    .toList();
+            prompt = prompt.messages(messages);
+        }
+        String answer = prompt.user(question).call().content();
         return new ChatResponse(answer, context.getSources(), context.getRiskLevel(), context.getRiskReason());
     }
 

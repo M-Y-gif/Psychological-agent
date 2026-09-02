@@ -23,10 +23,10 @@ public class ChatController {
         this.ragService = ragService;
     }
 
-    /** 用户提问 -> Agent 自主决策（检索/风险评估/预警）-> 大模型生成回答；emotionContext 可选传入多模态情绪特征 */
+    /** 用户提问 -> Agent 自主决策（检索/风险评估/预警）-> 大模型生成回答；支持多轮历史与多模态情绪特征 */
     @PostMapping("/chat")
     public ChatResponse chat(@RequestBody ChatRequest request) {
-        return ragService.answer(request.question(), request.emotionContext());
+        return ragService.answer(request.question(), request.emotionContext(), request.history());
     }
 
     /** 仅检索，返回命中的知识片段（调试/评测用） */

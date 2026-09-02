@@ -14,6 +14,17 @@ export async function chat(question, emotionContext) {
   return data
 }
 
+export async function analysisSession(turns, preRiskLevel, preRiskReason) {
+  const res = await fetch(`${BASE}/analysis/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ turns, preRiskLevel, preRiskReason })
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
 export async function multimodalAnalyze(audioFile, imageFile) {
   const fd = new FormData()
   if (audioFile) fd.append('audio', audioFile)

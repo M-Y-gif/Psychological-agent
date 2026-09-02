@@ -14,11 +14,13 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
 /**
  * 风险记录 Excel 服务：追加写入风险留痕（时间、等级、依据、消息）。
+ * 采用「临时文件 + 原子替换」，避免写入中断导致文件损坏；文件损坏时自动重建。
  */
 @Service
 public class RiskRecordExcelService {
@@ -33,21 +35,16 @@ public class RiskRecordExcelService {
         this.props = props;
     }
 
-    public String appendRiskRecord(int riskLevel, String reason, String userMessage) {
+    public synchronized String appendRiskRecord(int riskLevel, String reason, String userMessage) {
         Path file = Path.of(props.excelPath());
         try {
-            Files.createDirectories(file.getParent() == null ? Path.of(".") : file.getParent());
-            Workbook wb;
-            Sheet sheet;
-            if (Files.exists(file)) {
-                wb = WorkbookFactory.create(file.toFile());
-                sheet = wb.getSheet(SHEET);
-                if (sheet == null) {
-                    sheet = wb.createSheet(SHEET);
-                    writeHeader(sheet);
-                }
-            } else {
-                wb = new XSSFWorkbook();
+            Path parent = file.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            Workbook wb = openWorkbook(file);
+            Sheet sheet = wb.getSheet(SHEET);
+            if (sheet == null) {
                 sheet = wb.createSheet(SHEET);
                 writeHeader(sheet);
             }
@@ -59,16 +56,31 @@ public class RiskRecordExcelService {
             row.createCell(2).setCellValue(reason == null ? "" : reason);
             row.createCell(3).setCellValue(truncate(userMessage, 200));
 
-            try (OutputStream out = Files.newOutputStream(file)) {
+            // 先写临时文件，成功后原子替换，防止中断留下 0 字节损坏文件
+            Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
+            try (OutputStream out = Files.newOutputStream(tmp)) {
                 wb.write(out);
             }
             wb.close();
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
             log.info("风险记录已写入 {}", file.toAbsolutePath());
             return "风险记录已写入 Excel: " + file.toAbsolutePath();
-        } catch (IOException e) {
+        } catch (Exception e) {
             log.error("写入风险记录 Excel 失败", e);
             return "写入风险记录失败：" + e.getMessage();
         }
+    }
+
+    private Workbook openWorkbook(Path file) throws IOException {
+        if (Files.exists(file) && Files.size(file) > 0) {
+            try {
+                return WorkbookFactory.create(file.toFile());
+            } catch (Exception e) {
+                log.warn("风险记录文件损坏（{}），自动重建：{}", file.getFileName(), e.getMessage());
+                return new XSSFWorkbook();
+            }
+        }
+        return new XSSFWorkbook();
     }
 
     private static void writeHeader(Sheet sheet) {
