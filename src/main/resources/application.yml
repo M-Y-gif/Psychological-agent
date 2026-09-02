@@ -1,0 +1,75 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: psy-agent
+  ai:
+    # ===== MCP（第三步）：把外部能力封装为标准协议工具 =====
+    mcp:
+      server:
+        enabled: true
+        type: SYNC
+        name: psy-warning-mcp
+        version: 1.0.0
+      client:
+        enabled: false
+        type: SYNC
+
+    # 对话模型用 OpenAI 协议（DeepSeek 兼容），向量化用本地 ONNX 模型
+    model:
+      embedding: transformers
+    openai:
+      base-url: ${AI_BASE_URL:https://api.deepseek.com}
+      api-key: ${AI_API_KEY:sk-placeholder}
+      chat:
+        options:
+          model: ${AI_CHAT_MODEL:deepseek-chat}
+          temperature: 0.7
+    embedding:
+      transformer:
+        onnx:
+          # 中文多语言向量模型（首次使用自动下载约 470MB 到本地缓存）
+          model-uri: ${EMBEDDING_MODEL_URI:https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/onnx/model.onnx}
+          model-output-name: last_hidden_state
+        tokenizer:
+          uri: ${EMBEDDING_TOKENIZER_URI:https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/tokenizer.json}
+        cache:
+          enabled: true
+          directory: ${EMBEDDING_CACHE_DIR:.embedding-cache}
+    vectorstore:
+      chroma:
+        client:
+          host: ${CHROMA_HOST:http://localhost}
+          port: ${CHROMA_PORT:8000}
+        collection-name: ${CHROMA_COLLECTION:psychology_kb}
+        initialize-schema: true
+
+psy:
+  multimodal:
+    base-url: ${MULTIMODAL_BASE_URL:http://localhost:8090}
+    enabled: true
+
+  warning:
+    mail-enabled: ${WARNING_MAIL_ENABLED:false}   # true 时走真实 SMTP（需配 spring.mail.*）
+    mail-to: ${WARNING_MAIL_TO:consultant@example.com}
+    mail-outbox-dir: ${WARNING_MAIL_OUTBOX:data/emails}   # 演示模式：邮件落盘目录
+    excel-path: ${WARNING_EXCEL_PATH:data/risk_records.xlsx}
+
+  rag:
+    docs-path: ${DOCS_PATH:docs}            # 心理学文献目录
+    ingest-on-startup: ${INGEST_ON_STARTUP:true}  # 启动时自动向量化
+    top-k: ${RAG_TOP_K:3}                   # 检索返回片段数
+    chunk-size: 500                         # 分块大小（字符）
+    chunk-overlap: 80                       # 分块重叠（字符）
+    system-prompt: |
+      你是一个专业、温暖、有同理心的心理学助手 Agent，基于认知行为疗法（CBT）等心理学知识为用户提供帮助。
+      你可以使用以下工具自主决策：
+      - 需要心理学专业知识回答时，调用 search_psychology_kb 检索知识库；
+      - 当用户表达强烈负面情绪、绝望或任何自伤/自杀相关话语时，必须调用 evaluate_risk_level 评估风险。
+      - 当 evaluate_risk_level 返回 2-3 级高风险时，必须立即调用 send_warning_email（通知咨询师/辅导员）和 write_risk_record_excel（记录留痕），二者都要调用。
+      回答要求：
+      1. 优先依据检索到的知识库内容回答，不要编造知识库中不存在的专业结论；
+      2. 如果知识库内容不足以回答，请如实说明，并给出通用性、安全性的建议；
+      3. 语气温和、尊重用户，不做诊断、不给绝对化结论；
+      4. 若评估结果显示高风险（2-3 级），请明确建议用户立即拨打心理援助热线（如 12356）或尽快寻求线下专业帮助，并表达关心。

@@ -1,0 +1,26 @@
+# Java
+target/
+*.class
+
+# 本地模型缓存（约 465MB，勿提交）
+.embedding-cache/
+
+# 运行时数据（预警邮件、风险记录，含用户消息，勿提交）
+/data/
+
+# 密钥与本地配置
+.env
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# Chroma 本地数据
+chroma-data/
+
+# IDE / 系统
+.idea/
+*.iml
+.vscode/
+.DS_Store
+*.log
