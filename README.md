@@ -37,7 +37,51 @@
     └── runner/                 # 启动时自动导入文档
 ```
 
-## 快速开始
+## 在 IntelliJ IDEA 中启动
+
+### 1. 先启动依赖服务（终端执行）
+
+```bash
+# Chroma 数据库（必须，8000 端口）
+pip install chromadb   # 已装可跳过
+chroma run --host 0.0.0.0 --port 8000 --path ./chroma-data
+
+# 多模态感知引擎（可选，视频对话需要，8090 端口）
+pip install -r multimodal/requirements.txt   # 已装可跳过
+python3 multimodal/app.py
+
+# Vue 前端（可选，开发模式 5173 端口）
+cd frontend && npm install && npm run dev
+```
+
+### 2. IDEA 打开项目
+
+1. `File -> Open` 选择项目根目录（`/Users/yuansunming/Documents/ChatGPT/心理agent`），等待 Maven 自动导入依赖（首次较慢）
+2. `File -> Project Structure -> Project SDK` 选择 JDK 17+（本机 JDK 25 可用，项目编译目标为 17）
+3. 确认 `Settings -> Build Tools -> Maven` 使用系统 Maven 或 IDEA 内置 Maven
+
+### 3. 配置 .env（IDEA 启动会自动读取）
+
+项目根目录已有 `.env`（gitignore 忽略，含你的 DeepSeek Key）。
+若没有，复制 `.env.example` 为 `.env` 并填写。IDEA 中直接运行即可，无需手动设置环境变量。
+
+### 4. 运行
+
+- 找到 `src/main/java/com/psyagent/PsyAgentApplication.java`，右键 `Run`
+- 日志出现 `Started PsyAgentApplication` 与 `文档导入完成` 即成功
+- 访问：后端测试页 `http://localhost:8080`，Vue 前端 `http://localhost:5173`
+
+### 常见问题
+
+- **8080 端口被占用**：改 `application.yml` 的 `server.port`，或停掉旧进程
+- **连不上 Chroma**：确认 Chroma 用 `--host 0.0.0.0` 启动
+- **问答报 401/404**：确认 `.env` 里的 `AI_API_KEY` / `AI_BASE_URL` 正确（地址不要带 `/v1`）
+- **IDEA 中文乱码**：`Settings -> Editor -> File Encodings` 全部设为 UTF-8
+
+---
+
+## 快速开始（命令行方式）
+
 
 ### 1. 启动 Chroma（二选一）
 
