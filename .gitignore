@@ -24,3 +24,11 @@ chroma-data/
 .vscode/
 .DS_Store
 *.log
+
+# Office 临时锁文件（WPS / MS Office）
+~$*
+.~*
+
+# Python 字节码缓存
+__pycache__/
+*.pyc
