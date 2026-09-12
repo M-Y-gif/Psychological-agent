@@ -5,3 +5,4 @@ numpy
 opencv-python-headless
 mediapipe
 faster-whisper
+edge-tts>=6.1.12

@@ -70,4 +70,37 @@ public class MultimodalClient {
             throw new RuntimeException("多模态感知调用失败(" + path + "): " + e.getMessage(), e);
         }
     }
+
+    /**
+     * 语音合成：POST /api/tts（JSON 请求体），返回 mp3 原始字节。
+     * 失败抛异常，由上层（TtsController -> 前端）降级到浏览器 speechSynthesis。
+     */
+    public byte[] tts(String text, String voice, String rate) {
+        try {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("text", text);
+            body.put("voice", voice);
+            body.put("rate", rate);
+            String base = props.baseUrl().replaceAll("/+$", "");
+            HttpURLConnection conn = (HttpURLConnection) URI.create(base + "/api/tts").toURL().openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(120000);
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(objectMapper.writeValueAsBytes(body));
+            }
+            int code = conn.getResponseCode();
+            InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            byte[] bytes = stream == null ? new byte[0] : stream.readAllBytes();
+            if (code >= 400) {
+                throw new RuntimeException("/api/tts 返回 " + code + ": "
+                        + new String(bytes, StandardCharsets.UTF_8));
+            }
+            return bytes;
+        } catch (Exception e) {
+            throw new RuntimeException("语音合成调用失败: " + e.getMessage(), e);
+        }
+    }
 }

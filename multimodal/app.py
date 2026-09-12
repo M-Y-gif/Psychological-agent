@@ -4,22 +4,31 @@
 - /api/emotion : 人脸关键点 -> 表情特征
    默认引擎 OpenCV DNN YuNet（纯 CPU，稳定）；
    可选 EMOTION_ENGINE=mediapipe（MediaPipe FaceLandmarker 表情系数，需 GPU/Metal 环境）。
+- /api/tts     : edge-tts 语音合成（微软在线神经音色，需联网），结果缓存 7 天。
 Java 后端通过 HTTP 调用本服务，把情绪特征作为上下文参数传给大模型。
 """
+import hashlib
 import json
 import math
 import os
 import tempfile
+from datetime import datetime, timedelta
 
 import cv2
+import edge_tts
 import numpy as np
 from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 from faster_whisper import WhisperModel
 
 MODEL_SIZE = "small"                     # whisper 模型：tiny/base/small/medium
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YUNET_PATH = os.path.join(BASE_DIR, "models", "yunet.onnx")
 EMOTION_ENGINE = os.environ.get("EMOTION_ENGINE", "opencv").lower()
+# 微软语音服务器在国内网络可能无法直连：如本机有代理（如 Clash），设置 TTS_PROXY=http://127.0.0.1:7897
+TTS_PROXY = os.environ.get("TTS_PROXY", "")
+TTS_CACHE_DIR = os.path.join(BASE_DIR, "tts_cache")
+TTS_CACHE_DAYS = 7
 
 app = FastAPI(title="心理 Agent 多模态感知引擎")
 whisper = None
@@ -35,7 +44,58 @@ def load_models():
         _load_mediapipe()
     else:
         yunet = cv2.FaceDetectorYN_create(YUNET_PATH, "", (320, 320), 0.6, 0.3, 5000)
+    _clean_tts_cache()
     print(f"[multimodal] Whisper({MODEL_SIZE}) + 表情引擎({EMOTION_ENGINE}) 已加载")
+
+
+def _clean_tts_cache():
+    """删除超过 TTS_CACHE_DAYS 天的合成缓存"""
+    if not os.path.isdir(TTS_CACHE_DIR):
+        return
+    cutoff = datetime.now() - timedelta(days=TTS_CACHE_DAYS)
+    removed = 0
+    for name in os.listdir(TTS_CACHE_DIR):
+        path = os.path.join(TTS_CACHE_DIR, name)
+        try:
+            if os.path.isfile(path) and datetime.fromtimestamp(os.path.getmtime(path)) < cutoff:
+                os.remove(path)
+                removed += 1
+        except OSError:
+            pass
+    if removed:
+        print(f"[multimodal] 清理 TTS 缓存 {removed} 个文件")
+
+
+# ==================== 语音合成：edge-tts（微软在线神经音色） ====================
+@app.post("/api/tts")
+async def tts(request: Request):
+    """JSON 请求体：{"text": "...", "voice": "zh-CN-XiaoxiaoNeural", "rate": "-20%"} -> mp3 字节"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON 请求体解析失败"}, status_code=400)
+    text = (body.get("text") or "").strip()[:500]
+    voice = body.get("voice") or "zh-CN-XiaoxiaoNeural"
+    rate = body.get("rate") or "+0%"
+    if not text:
+        return JSONResponse({"error": "text 不能为空"}, status_code=400)
+
+    key = hashlib.sha1(f"{text}|{voice}|{rate}".encode("utf-8")).hexdigest()
+    cached = os.path.join(TTS_CACHE_DIR, key + ".mp3")
+    hit = os.path.exists(cached)
+    if not hit:
+        os.makedirs(TTS_CACHE_DIR, exist_ok=True)
+        tmp = cached + ".tmp"
+        try:
+            communicate = edge_tts.Communicate(
+                text, voice, rate=rate, proxy=TTS_PROXY or None)
+            await communicate.save(tmp)
+        except Exception as e:  # 离线 / 网络失败 / 音色名非法
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            return JSONResponse({"error": f"TTS 合成失败: {e}"}, status_code=502)
+        os.replace(tmp, cached)
+    return FileResponse(cached, media_type="audio/mpeg", headers={"X-TTS-Cache": "hit" if hit else "miss"})
 
 
 def _load_mediapipe():
