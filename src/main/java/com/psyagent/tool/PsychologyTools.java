@@ -4,6 +4,7 @@ import com.psyagent.config.RagProperties;
 import com.psyagent.dto.SourceItem;
 import com.psyagent.service.RiskEvaluator;
 import com.psyagent.service.ToolCallContext;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.vectorstore.SearchRequest;
@@ -22,28 +23,37 @@ public class PsychologyTools {
 
     private final VectorStore vectorStore;
     private final RiskEvaluator riskEvaluator;
-    private final ToolCallContext context;
     private final int topK;
 
-    public PsychologyTools(VectorStore vectorStore, RiskEvaluator riskEvaluator,
-                           ToolCallContext context, RagProperties props) {
+    public PsychologyTools(VectorStore vectorStore, RiskEvaluator riskEvaluator, RagProperties props) {
         this.vectorStore = vectorStore;
         this.riskEvaluator = riskEvaluator;
-        this.context = context;
         this.topK = props.topK();
     }
 
+    /** 从 ToolContext 取出本轮上下文；外部（如 MCP）直接调用时为 null，不影响工具本身工作 */
+    private static ToolCallContext ctx(ToolContext toolContext) {
+        if (toolContext == null || toolContext.getContext() == null) {
+            return null;
+        }
+        Object v = toolContext.getContext().get(ToolCallContext.KEY);
+        return v instanceof ToolCallContext c ? c : null;
+    }
+
     @Tool(description = "在心理学知识库中检索与用户问题相关的知识片段。当你需要基于心理学专业知识（如 CBT、情绪调节、放松技巧等）回答用户问题时调用，参数 query 为检索关键词或用户原话。")
-    public String search_psychology_kb(String query) {
+    public String search_psychology_kb(String query, ToolContext toolContext) {
         List<Document> hits = vectorStore.similaritySearch(
                 SearchRequest.builder().query(query).topK(topK).build());
 
+        ToolCallContext context = ctx(toolContext);
         StringBuilder sb = new StringBuilder();
         int i = 1;
         for (Document d : hits) {
             String source = String.valueOf(d.getMetadata().getOrDefault("source", "unknown"));
-            context.addSource(new SourceItem(source, truncate(d.getText(), 120),
-                    d.getScore() == null ? 0.0 : d.getScore()));
+            if (context != null) {
+                context.addSource(new SourceItem(source, truncate(d.getText(), 120),
+                        d.getScore() == null ? 0.0 : d.getScore()));
+            }
             sb.append("【片段").append(i++).append("｜来源：").append(source).append("】\n")
                     .append(d.getText()).append("\n\n");
         }
@@ -51,9 +61,12 @@ public class PsychologyTools {
     }
 
     @Tool(description = "评估用户消息的心理风险等级，返回 0-3 级：0=无明显风险，1=轻度情绪困扰，2=中高风险，3=极高风险（有自伤/自杀倾向）。当用户表达强烈负面情绪、绝望，或任何自伤/自杀相关话语时，必须调用此工具。可选参数 emotionContext 为多模态情绪特征（语速/停顿/表情等 JSON 字符串），若有请务必传入以综合研判。")
-    public String evaluate_risk_level(String userMessage, String emotionContext) {
+    public String evaluate_risk_level(String userMessage, String emotionContext, ToolContext toolContext) {
         RiskEvaluator.RiskResult result = riskEvaluator.evaluate(userMessage, emotionContext);
-        context.setRisk(result.level(), result.reason());
+        ToolCallContext context = ctx(toolContext);
+        if (context != null) {
+            context.setRisk(result.level(), result.reason());
+        }
         return "风险等级：" + result.level() + "（0-3级）\n判定依据：" + result.reason();
     }
 

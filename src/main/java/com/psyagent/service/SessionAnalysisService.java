@@ -2,6 +2,7 @@ package com.psyagent.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.psyagent.dto.Caller;
 import com.psyagent.dto.SessionAnalysisRequest;
 import com.psyagent.dto.SessionAnalysisResponse;
 import org.slf4j.Logger;
@@ -34,16 +35,24 @@ public class SessionAnalysisService {
     private final ObjectMapper objectMapper;
     private final RiskRecordExcelService excelService;
     private final WarningEmailService emailService;
+    private final MemoryService memoryService;
 
     public SessionAnalysisService(ChatModel chatModel, ObjectMapper objectMapper,
-                                  RiskRecordExcelService excelService, WarningEmailService emailService) {
+                                  RiskRecordExcelService excelService, WarningEmailService emailService,
+                                  MemoryService memoryService) {
         this.analysisChatClient = ChatClient.builder(chatModel).build();
         this.objectMapper = objectMapper;
         this.excelService = excelService;
         this.emailService = emailService;
+        this.memoryService = memoryService;
     }
 
     public SessionAnalysisResponse analyze(SessionAnalysisRequest request) {
+        return analyze(request, Caller.anonymous());
+    }
+
+    /** 带使用者身份的分析：情绪结论回写长期记忆（供语气调整与主动关怀使用） */
+    public SessionAnalysisResponse analyze(SessionAnalysisRequest request, Caller caller) {
         String transcript = buildTranscript(request);
         String prompt = """
                 你是资深心理咨询师，请对以下"用户与心理助手"的完整对话进行心理分析，只输出 JSON，不要输出其他内容：
@@ -73,6 +82,12 @@ public class SessionAnalysisService {
         }
 
         SessionAnalysisResponse response = parse(json, request);
+        // 情绪结论回写长期记忆（失败不影响报告返回）
+        try {
+            memoryService.recordSessionAnalysis(caller, response.overallMood(), response.emotionTrend());
+        } catch (Exception e) {
+            log.warn("回写情绪结论到记忆失败：{}", e.getMessage());
+        }
         // 高风险自动预警留痕
         if (response.riskLevel() >= 2) {
             excelService.appendRiskRecord(response.riskLevel(),
