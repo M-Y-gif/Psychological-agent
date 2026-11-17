@@ -286,7 +286,7 @@ def setup(doc):
 
 def main():
     sys.path.insert(0, HERE)
-    import content
+    import content_v2 as content
     doc = Document()
     setup(doc)
     render(doc, content.blocks())

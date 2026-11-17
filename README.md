@@ -5,7 +5,7 @@
 > - **第二步**：Agent 工具调用（Function Calling）——`search_psychology_kb` / `evaluate_risk_level`
 > - **第三步**：MCP 封装外部能力——高风险自动触发 `send_warning_email` / `write_risk_record_excel`
 > - **第四步**：多模态感知——Whisper 语音转写 + 韵律特征、人脸表情特征，作为上下文参与综合研判
-> - **第五步**：人格化陪伴——长者/孩子/家属三套人设 + 长期记忆 + 主动关怀 + edge-tts 语音合成；LoRA 微调接入
+> - **第五步**：人格化陪伴——长者/孩子/家属三套人设 + 长期记忆（检索式注入）+ 主动关怀 + 心情日记/情绪打卡 + edge-tts 语音合成；LoRA 微调接入
 > - **评测**：风险识别（PsyCrisis-Bench，召回率 85.6%，零误报）+ 情感陪伴质量（LLM-as-judge 四维评分）
 
 ## 技术栈
@@ -29,17 +29,18 @@
 ├── docker-compose.yml          # Chroma 一键启动（可选）
 ├── docs/                       # 心理学文献（启动时自动向量化）
 ├── multimodal/                 # Python 多模态微服务：Whisper 转写 / 表情特征 / edge-tts
-├── frontend/                   # Vue3 + Vite 前端（文字/视频对话、呼吸游戏、风险记录）
+├── frontend/                   # Vue3 + Vite 前端（对话/日记/它眼里的你/风险记录）
 ├── evaluation/                 # 评测数据与报告（风险识别 + 陪伴质量）
 ├── ppt/ · report/              # 答辩 PPT、工程实践报告生成脚本与成品
 └── src/main/java/com/psyagent/
     ├── PsyAgentApplication.java
     ├── config/                 # 配置类（PersonaProperties 人格设定等）
-    ├── controller/             # REST 接口（Chat / Care / Tts / Analysis / Eval / Multimodal）
+    ├── controller/             # REST 接口（Chat / Diary / Care / Tts / Analysis / Eval / Multimodal）
     ├── dto/                    # 请求/响应对象（含 Caller：按请求头识别使用者）
     ├── eval/                   # RiskEvalService、CompanionEvalService 评测服务
     ├── service/                # RagService（问答闭环）、MemoryService（长期记忆）、
-    │                           # CareService（主动关怀）、DocIngestionService、ToolCallContext
+    │                           # DiaryService（日记回信）、CareService（主动关怀）、
+    │                           # DocIngestionService、ToolCallContext
     ├── tool/PsychologyTools.java # Agent 工具：search_psychology_kb / evaluate_risk_level
     ├── util/                   # TextChunker（中文分块）
     └── runner/                 # 启动时自动导入文档
@@ -207,11 +208,13 @@ curl "http://localhost:8080/api/rag/retrieve?question=腹式呼吸怎么练习"
 | 能力 | 说明 |
 | --- | --- |
 | 长期记忆 | `MemoryService`：每个使用者一个 JSON 文件（`data/users/<id>.json`），从对话中异步沉淀事实（家人/健康/习惯），跨会话"接得上上次的话"；感知情绪趋势，持续低落时自动调整语气 |
+| 检索式注入 | 注入记忆时不再固定取最近 N 条：用本地 ONNX 嵌入把「当前问题」与「事实/历史发言/日记」做相似度 Top-K 选择（带最近记忆兜底与旧逻辑回退），让 Agent 接得上更久远、更相关的事 |
+| 心情日记 | `POST /api/diary`：保存日记 + 1-5 情绪打卡（映射进情绪曲线），Agent 以人格化口吻写回信；**高风险日记自动触发预警邮件 + Excel 留痕**（与对话同一套工具链路） |
 | 主动关怀 | `CareService`：问候、情绪低落关怀、断连回访、睡前故事等；前端 `CareToast` 弹窗展示，确认后写入记忆避免重复打扰 |
 | 语音合成 | `POST /api/tts`：转发 Python edge-tts 服务返回 mp3；音色/语速按角色默认（elder 晓晓 -20% / child 晓伊 +10% / family 云希），失败时前端降级浏览器 speechSynthesis |
 | 流式回答 | `POST /api/chat/stream`（SSE）：token / meta（来源+风险等级）/ done 事件 |
 
-记忆与关怀接口：`GET /api/care/pending`（轮询取待展示关怀）、`POST /api/care/ack`（确认已展示）、`POST /api/care/trigger`（演示触发）、`GET /api/memory`（查看"它记得我什么"）。
+记忆与关怀接口：`GET /api/care/pending`（轮询取待展示关怀）、`POST /api/care/ack`（确认已展示）、`POST /api/care/trigger`（演示触发）、`GET /api/memory`（记忆档案：事实/情绪轨迹/关怀时间线/日记，供「它眼里的你」页面展示）。
 
 > 使用者由请求头 `X-User-Id` / `X-User-Name` / `X-User-Role` 识别（演示版不做鉴权）。
 
@@ -294,6 +297,8 @@ curl "http://localhost:8080/api/rag/retrieve?question=腹式呼吸怎么练习"
 | 🚪 进入页 | 选择陪伴角色（长者/孩子/家属），切换人格与语音音色 |
 | 💬 文字对话 | 提问 -> Agent 检索/评估/回答（SSE 流式打字机效果），显示命中片段与风险预警条，支持语音播报 |
 | 🎥 视频对话 | 多轮语音对话：每句语音转写+表情分析，Agent 记住上下文回应；结束后生成**心理分析报告**（负面->安慰鼓励，正面->同乐鼓励，高风险自动预警留痕） |
+| 📖 心情日记 | 1-5 表情打卡 + 写日记；保存后 AI 写温柔回信（可朗读）；高风险日记显示预警条并进风险记录；历史日记列表 |
+| 👁 它眼里的你 | 情绪轨迹曲线（聊天/日记/会话分析分来源）+ 记住的事实 + 关怀时间线 + 档案 + 最近日记 |
 | 🌬️ 放松小游戏 | 4-4-6 呼吸练习引导 |
 | 📋 风险记录 | 查看历史预警留痕记录（时间/等级/依据） |
 

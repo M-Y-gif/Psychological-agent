@@ -33,6 +33,12 @@
           <span class="nav-text">风险记录</span>
           <span v-if="myRecords.length" class="nav-badge">{{ myRecords.length }}</span>
         </button>
+        <button type="button" class="nav-item" :class="{ on: current === 'memory' }"
+                :aria-current="current === 'memory' ? 'page' : undefined"
+                @click="current = 'memory'">
+          <Icon name="eye" />
+          <span class="nav-text">它眼里的你</span>
+        </button>
       </nav>
 
       <div class="rail-foot">
@@ -67,6 +73,8 @@
                      :key="breathSeq"
                      :auto-start-pattern="breathAction ? breathAction.pattern : ''"
                      @consumed="consumeBreath" />
+      <DiaryView v-else-if="current === 'diary'" />
+      <MemoryView v-else-if="current === 'memory'" />
       <RiskRecords v-else />
     </div>
 
@@ -83,6 +91,8 @@ import EntryView from './components/EntryView.vue'
 import TextChat from './components/TextChat.vue'
 import VideoChat from './components/VideoChat.vue'
 import BreathingGame from './components/BreathingGame.vue'
+import DiaryView from './components/DiaryView.vue'
+import MemoryView from './components/MemoryView.vue'
 import RiskRecords from './components/RiskRecords.vue'
 import CareToast from './components/CareToast.vue'
 import {
@@ -93,7 +103,8 @@ import {
 const workTabs = [
   { key: 'text', label: '文字对话', icon: 'chat' },
   { key: 'video', label: '视频感知', icon: 'video' },
-  { key: 'breath', label: '呼吸练习', icon: 'breath' }
+  { key: 'breath', label: '呼吸练习', icon: 'breath' },
+  { key: 'diary', label: '心情日记', icon: 'book' }
 ]
 
 const current = ref('text')

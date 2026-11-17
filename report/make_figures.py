@@ -238,11 +238,10 @@ def fig_voice():
 
 # ---------------- 图 5：ER 图 ----------------
 def fig_er():
-    W, H = 900, 560
+    W, H = 1180, 620
     img, d = canvas(W, H)
     label(d, 30, 26, '图 6-1  数据库实体关系（ER）图', size=15, color=INK, anchor='lm', bold=True)
 
-    # 实体框：标题 + 字段
     def entity(x, y, w, title, fields, fill=ACC_BG, ln=ACC_LN, tx=ACC_TX):
         h = 30 + len(fields) * 17
         d.rounded_rectangle([x * S, y * S, (x + w) * S, (y + h) * S], radius=8 * S,
@@ -254,32 +253,50 @@ def fig_er():
             d.text(((x + 8) * S, (y + 38 + i * 17) * S), f, font=font(9.8, light=True), fill=INK2, anchor='lm')
         return (x, y, w, h)
 
-    e1 = entity(40, 70, 175, 'app_user 使用者', ['PK id', 'role 角色', 'name 称呼', 'created_at', 'last_active'])
-    e2 = entity(40, 230, 175, 'conversation 会话', ['PK id', 'FK user_id', 'started_at', 'ended_at'])
-    e3 = entity(40, 370, 175, 'message 消息', ['PK id', 'FK conversation_id', 'speaker 角色', 'content', 'created_at'])
-    e4 = entity(360, 70, 195, 'risk_record 风险记录', ['PK id', 'FK user_id / message_id', 'level 等级', 'reason 依据', 'notified 是否通知', 'created_at'])
-    e5 = entity(360, 260, 195, 'memory_fact 记忆事实', ['PK id', 'FK user_id', 'fact_text', 'source_turn', 'created_at'])
-    e6 = entity(360, 430, 195, 'care_message 主动关怀', ['PK id', 'FK user_id', 'content', 'reason 触发原因', 'delivered 已送达'])
-    e7 = entity(660, 70, 200, 'knowledge_doc 知识文档', ['PK id', 'title', 'source_path', 'chunk_count', 'indexed_at'])
-    e8 = entity(660, 260, 200, 'kb_chunk 知识片段', ['PK id', 'FK doc_id', 'content', 'embedding_ref', 'score'])
-    e9 = entity(660, 430, 200, 'warning_log 预警日志', ['PK id', 'FK risk_record_id', 'channel 渠道', 'payload', 'sent_at'])
+    # 第 1 列：使用者与对话
+    entity(35, 70, 165, 'app_user 使用者', ['PK id', 'role 角色', 'name 称呼', 'created_at', 'last_active'])
+    entity(35, 235, 165, 'conversation 会话', ['PK id', 'FK user_id', 'started_at', 'ended_at'])
+    entity(35, 380, 165, 'message 消息', ['PK id', 'FK conversation_id', 'speaker 角色', 'content', 'created_at'])
 
-    # 关系连线
-    arrow(d, 215, 130, 360, 130, color=INK2, width=2)          # user - risk_record
-    arrow(d, 215, 200, 360, 300, color=INK2, width=2)          # user - memory_fact
-    arrow(d, 215, 250, 360, 470, color=INK2, width=2)          # user - care_message
-    arrow(d, 127, 175, 127, 230, color=INK2, width=2)          # user - conversation
-    arrow(d, 127, 330, 127, 370, color=INK2, width=2)          # conversation - message
-    arrow(d, 215, 400, 360, 150, color=INK2, width=2, dash=True)  # message - risk_record
-    arrow(d, 555, 130, 660, 130, color=INK2, width=2, dash=True)  # risk_record - knowledge? (示意)
-    arrow(d, 660, 150, 555, 470, color=INK2, width=2, dash=True)  # warning_log
-    arrow(d, 760, 175, 760, 260, color=INK2, width=2)          # doc - chunk
-    arrow(d, 760, 385, 760, 430, color=INK2, width=2, dash=True)
+    # 第 2 列：风险与关怀
+    entity(320, 70, 190, 'risk_record 风险记录', ['PK id', 'FK user_id', 'FK message_id', 'level 等级', 'reason 依据', 'created_at'])
+    entity(320, 245, 190, 'care_message 主动关怀', ['PK id', 'FK user_id', 'type 类型', 'content 内容', 'reason 触发原因', 'delivered 已送达'])
+    entity(320, 445, 190, 'warning_log 预警日志', ['PK id', 'FK risk_record_id', 'channel 渠道', 'sent_at'])
 
-    for x, y, t in [(240, 118, '1:N'), (250, 286, '1:N'), (250, 456, '1:N'),
-                    (133, 206, '1:N'), (133, 353, '1:N')]:
+    # 第 3 列：记忆
+    entity(625, 70, 185, 'memory_fact 记忆事实', ['PK id', 'FK user_id', 'fact_text 事实', 'created_at'])
+    entity(625, 215, 185, 'memory_event 日程事件', ['PK id', 'FK user_id', 'event_text 事件', 'event_date 日期', 'reminded 已回访'])
+    entity(625, 395, 185, 'mood_score 情绪打卡', ['PK id', 'FK user_id', 'score 分值', 'source 来源', 'created_at'])
+
+    # 第 4 列：知识库与日记
+    entity(925, 70, 220, 'knowledge_doc 知识文档', ['PK id', 'title 标题', 'chunk_count 片段数', 'indexed_at 向量化时间'])
+    entity(925, 240, 220, 'kb_chunk 知识片段', ['PK id', 'FK doc_id', 'content 正文', 'embedding_ref 向量标识'])
+    entity(925, 405, 220, 'diary 心情日记', ['PK id', 'FK user_id', 'content 正文', 'mood 心情 1-5', 'mood_score 映射分', 'reply 回信', 'risk_level 回信风险'])
+
+    def rel(x1, y1, x2, y2, dash=False):
+        arrow(d, x1, y1, x2, y2, color=INK2, width=2, dash=dash)
+
+    # 使用者 → 各归属实体
+    rel(200, 120, 320, 120)          # app_user → risk_record
+    rel(200, 150, 320, 300)          # app_user → care_message
+    rel(200, 190, 625, 120)          # app_user → memory_fact
+    rel(200, 205, 625, 265)          # app_user → memory_event
+    rel(200, 230, 625, 445)          # app_user → mood_score
+    rel(200, 245, 925, 460)          # app_user → diary
+    rel(117, 175, 117, 235)          # app_user → conversation
+    rel(117, 340, 117, 380)          # conversation → message
+
+    # 其他关系
+    rel(415, 200, 415, 245)          # risk_record → care_message（同一使用者）
+    rel(510, 105, 625, 105, dash=True)   # risk_record → 记忆（同源）
+    rel(510, 300, 510, 445)          # care_message → warning_log
+    rel(1035, 175, 1035, 240)        # knowledge_doc → kb_chunk
+
+    for x, y, t in [(240, 108, '1:N'), (255, 210, '1:N'), (400, 96, '1:N'),
+                    (123, 208, '1:N'), (123, 362, '1:N')]:
         label(d, x, y, t, size=9.5, color=INK2)
-    label(d, 40, 540, '说明：实线为一对多主关系，虚线为可选的关联记录（同一轮对话可产生风险记录与预警日志）。',
+    label(d, 35, 590, '说明：实线为主关系，虚线为可选关联。记忆域按数据类型分表存储，'
+                      '便于分别做检索式注入（事实/事件）与趋势分析（情绪打卡）。',
           size=10.5, color=INK2, anchor='lm')
     save(img, 'fig_er.png', W, H)
 

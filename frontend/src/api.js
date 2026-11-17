@@ -155,6 +155,17 @@ export async function fetchMemory() {
   return toJson(res)
 }
 
+/** 保存心情日记：text 正文；mood 1-5 心情（可空）。返回 {diary, riskLevel, riskReason} */
+export async function addDiary(text, mood, signal) {
+  const res = await fetch(`${BASE}/diary`, {
+    method: 'POST',
+    headers: userHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ text, mood: mood || null }),
+    signal
+  })
+  return toJson(res)
+}
+
 /** 语音合成：返回 mp3 Blob（失败抛异常，由调用方降级到浏览器语音） */
 export async function tts(text, { voice, rate, signal } = {}) {
   const body = { text }

@@ -105,6 +105,14 @@
       <path d="M6.4 10a5.6 5.6 0 0 1 11.2 0c0 4.6 1.8 5.8 2.6 6.4H3.8c.8-.6 2.6-1.8 2.6-6.4z" />
       <path d="M10 19.6a2.2 2.2 0 0 0 4 0" />
     </symbol>
+    <symbol id="ic-book" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 6.2C10.6 4.9 8.6 4.3 5.2 4.3v13.9c3.4 0 5.4.6 6.8 1.9 1.4-1.3 3.4-1.9 6.8-1.9V4.3c-3.4 0-5.4.6-6.8 1.9z" />
+      <path d="M12 6.2v13.9" />
+    </symbol>
+    <symbol id="ic-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2.6 12S6 5.8 12 5.8 21.4 12 21.4 12 18 18.2 12 18.2 2.6 12 2.6 12z" />
+      <circle cx="12" cy="12" r="2.7" />
+    </symbol>
   </svg>
 </template>
 

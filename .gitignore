@@ -32,3 +32,13 @@ chroma-data/
 # Python 字节码缓存
 __pycache__/
 *.pyc
+
+# 深度学习训练产物（太大，不上传GitHub）
+data/bert_risk/best_model/
+data/bert_risk/*.jsonl
+data/fer_cnn/train/
+data/fer_cnn/val/
+data/fer_cnn/test/
+data/fer_cnn/best_model/
+data/fer_cnn/fer2013.csv
+evaluation/figures/*.png

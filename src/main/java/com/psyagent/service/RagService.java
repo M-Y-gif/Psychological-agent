@@ -78,8 +78,8 @@ public class RagService {
         if (persona != null && persona.system() != null && !persona.system().isBlank()) {
             systemPrompt += "\n\n" + persona.system();
         }
-        // 长期记忆：让这次回答能接上"上次说过的话"
-        String remembered = memory.promptContext(caller);
+        // 长期记忆：让这次回答能接上"上次说过的话"（按当前问题检索式选择）
+        String remembered = memory.promptContext(caller, question);
         if (remembered != null) {
             systemPrompt += "\n\n【关于这位来访者，你记得的事】\n" + remembered;
         }
