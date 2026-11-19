@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-BERT 心理风险分类 - 数据预处理脚本
+BERT 心理风险分类 - 数据预处理脚本 (v2 - 修复SoulChat加载)
 ===================================
 数据来源：
   1. PsyCrisis-Bench.xlsx  (608条, label 0/1/2)
   2. test_set.csv           (130条, gold_level 0-3, 带category)
-  3. risk_eval_cases.csv    (评测案例, 可选补充)
+  3. SoulChatCorpus         (258K条多轮对话, 通过关键词匹配提取风险样本)
 
 输出：
   data/bert_risk/train.jsonl   (~80%)
@@ -13,15 +13,14 @@ BERT 心理风险分类 - 数据预处理脚本
   data/bert_risk/test.jsonl    (~10%)
   data/bert_risk/label_map.json
 
-标签体系（4级）：
+标签体系（3级，合并原2+3）：
   0 = 无明显风险
   1 = 轻度情绪困扰
-  2 = 中高风险（强烈负面情绪/隐晦自伤意念）
-  3 = 极高风险（明确自伤/自杀意图或计划）
+  2 = 高风险（中高风险+极高风险合并）
 
 用法：
   python3 scripts/prepare_risk_data.py
-  python3 scripts/prepare_risk_data.py --add-soulchat   # 追加SoulChatCorpus（需先下载）
+  python3 scripts/prepare_risk_data.py --add-soulchat   # 追加SoulChatCorpus
 """
 
 import argparse
@@ -42,21 +41,39 @@ OUTPUT_DIR = PROJECT_ROOT / "data" / "bert_risk"
 RANDOM_SEED = 42
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
-# TEST_RATIO = 0.1 (remainder)
 
 LABEL_NAMES = {
     0: "无风险",
     1: "轻度困扰",
-    2: "中高风险",
-    3: "极高风险",
+    2: "高风险",
 }
+
+# 风险关键词（用于从SoulChatCorpus中提取有风险的用户消息）
+HIGH_RISK_KEYWORDS = [
+    "自杀", "自伤", "想死", "不想活", "活不下去", "结束生命", "结束自己",
+    "伤害自己", "割腕", "跳楼", "安眠药", "遗书", "告别", "活着没意思",
+    "消失", "解脱", "自我了断", "不想醒来", "没意义了", "去死", "寻死",
+    "死了算了", "不如死了", "想不开", "轻生",
+]
+
+MODERATE_RISK_KEYWORDS = [
+    "绝望", "崩溃", "撑不下去", "撑不住", "受不了", "毫无希望", "没有希望",
+    "无意义", "空虚", "无助", "痛苦", "抑郁", "焦虑", "恐慌", "窒息",
+    "喘不过气", "想哭", "好累", "疲惫", "孤独", "没人理解", "被抛弃",
+    "讨厌自己", "恨自己", "没用", "废物", "失败",
+]
+
+MILD_KEYWORDS = [
+    "烦", "难过", "不开心", "失落", "迷茫", "压力", "紧张", "担心",
+    "害怕", "不安", "纠结", "困惑", "失眠", "睡不着", "食欲", "吃不下",
+]
 
 
 # ============================================================
 # 数据加载
 # ============================================================
 def load_psycrisis_bench(filepath: Path) -> list[dict]:
-    """加载 PsyCrisis-Bench.xlsx，label 0/1/2 → 映射到 0/1/2"""
+    """加载 PsyCrisis-Bench.xlsx"""
     try:
         import openpyxl
     except ImportError:
@@ -74,7 +91,8 @@ def load_psycrisis_bench(filepath: Path) -> list[dict]:
         text = str(text).strip()
         if not text:
             continue
-        # PsyCrisis-Bench 原始标签 0/1/2 直接对应我们的 0/1/2
+        # 原始标签 0/1/2 → 映射到 0/1/2（2和3合并为2）
+        label = min(label, 2)
         samples.append({"text": text, "label": label, "source": "psycrisis"})
     wb.close()
     print(f"[INFO] PsyCrisis-Bench: {len(samples)} samples loaded")
@@ -82,7 +100,7 @@ def load_psycrisis_bench(filepath: Path) -> list[dict]:
 
 
 def load_test_set(filepath: Path) -> list[dict]:
-    """加载 test_set.csv，gold_level 0-3 直接使用"""
+    """加载 test_set.csv"""
     samples = []
     if not filepath.exists():
         print(f"[WARN] {filepath} not found, skipping")
@@ -92,133 +110,149 @@ def load_test_set(filepath: Path) -> list[dict]:
         for row in reader:
             text = row.get("text", "").strip()
             level = row.get("gold_level", "").strip()
-            category = row.get("category", "").strip()
             if not text or not level:
                 continue
-            label = int(level)
-            label = max(0, min(3, label))  # clamp to 0-3
+            label = min(int(level), 2)  # 合并2+3→2
             samples.append({
                 "text": text,
                 "label": label,
                 "source": "test_set",
-                "category": category,
             })
     print(f"[INFO] test_set.csv: {len(samples)} samples loaded")
     return samples
 
 
-def load_risk_eval_cases(filepath: Path) -> list[dict]:
-    """加载评测案例中的漏报样本（gold>=2 且模型判低的），作为难例补充"""
-    samples = []
-    if not filepath.exists():
-        print(f"[WARN] {filepath} not found, skipping")
-        return []
-    with open(filepath, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            text = row.get("message", row.get("text", "")).strip()
-            gold = row.get("gold_level", row.get("gold", "")).strip()
-            if not text or not gold:
-                continue
-            try:
-                label = int(float(gold))
-            except ValueError:
-                continue
-            label = max(0, min(3, label))
-            samples.append({
-                "text": text,
-                "label": label,
-                "source": "eval_cases",
-            })
-    print(f"[INFO] risk_eval_cases: {len(samples)} samples loaded")
-    return samples
+def classify_text_by_keywords(text: str) -> int:
+    """通过关键词匹配判断风险等级"""
+    text_lower = text.lower()
+    high_count = sum(1 for kw in HIGH_RISK_KEYWORDS if kw in text_lower)
+    moderate_count = sum(1 for kw in MODERATE_RISK_KEYWORDS if kw in text_lower)
+    mild_count = sum(1 for kw in MILD_KEYWORDS if kw in text_lower)
+
+    if high_count >= 1:
+        return 2  # 高风险
+    elif moderate_count >= 2:
+        return 2  # 多项中度关键词也算高风险
+    elif moderate_count == 1:
+        return 1  # 轻度困扰
+    elif mild_count >= 2:
+        return 1  # 多项轻度关键词
+    else:
+        return 0  # 无风险
 
 
-def load_soulchat_emotion(data_dir: Path, max_samples: int = 5000) -> list[dict]:
+def load_soulchat(data_dir: Path, max_samples: int = 5000) -> list[dict]:
     """
-    加载 SoulChatCorpus 情绪对话子集（可选）。
-    将情绪标签映射为风险等级：
-      - 积极/平静/希望 → 0
-      - 焦虑/困惑/孤独 → 1
-      - 悲伤/绝望/愤怒 → 2
-      - 自伤/自杀相关 → 3
+    加载 SoulChatCorpus 数据集。
+    
+    数据格式（ModelScope下载后）：
+      data/soulchat/
+      ├── xxx.jsonl 或 xxx.json
+      每行一个JSON: {"id": 0, "topic": "成长", "messages": [{"role":"user","content":"..."},...]}
+    
+    策略：提取每条对话中所有 user 消息，用关键词匹配判断风险等级。
+    只保留 label >= 1 的样本（有风险的），避免大量无风险样本稀释数据。
     """
-    emotion_to_risk = {
-        # 低风险
-        "高兴": 0, "开心": 0, "平静": 0, "安心": 0, "感激": 0,
-        "希望": 0, "放松": 0, "满足": 0, "自信": 0,
-        # 轻度困扰
-        "焦虑": 1, "紧张": 1, "困惑": 1, "孤独": 1, "担心": 1,
-        "不安": 1, "迷茫": 1, "压力": 1, "疲惫": 1,
-        # 中高风险
-        "悲伤": 2, "难过": 2, "绝望": 2, "愤怒": 2, "痛苦": 2,
-        "无助": 2, "空虚": 2, "崩溃": 2, "抑郁": 2,
-        # 极高风险
-        "自伤": 3, "自杀": 3, "想死": 3,
-    }
-
     samples = []
     if not data_dir.exists():
         print(f"[WARN] SoulChat dir {data_dir} not found, skipping")
         return []
 
-    # 尝试读取常见格式
-    for fname in sorted(data_dir.glob("*.json*")):
-        with open(fname, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+    # 递归搜索所有json/jsonl文件（包括子目录）
+    json_files = list(data_dir.rglob("*.jsonl")) + list(data_dir.rglob("*.json"))
+    # 排除非数据文件
+    json_files = [f for f in json_files if f.stat().st_size > 1000]  # 至少1KB
+    
+    print(f"[INFO] Found {len(json_files)} JSON files in {data_dir}")
 
-                # 提取用户消息和情绪标签
-                text = ""
-                emotion = ""
-                if isinstance(obj, dict):
-                    # sharegpt 格式
-                    convs = obj.get("conversations", obj.get("messages", []))
-                    if convs:
-                        for c in convs:
-                            role = c.get("from", c.get("role", ""))
-                            if role in ("human", "user"):
-                                text = c.get("value", c.get("content", ""))
-                                break
-                    emotion = obj.get("emotion", obj.get("label", ""))
-                elif isinstance(obj, list):
-                    # 纯对话列表
-                    for item in obj:
-                        if isinstance(item, dict) and item.get("role") == "user":
-                            text = item.get("content", "")
-                            break
+    total_user_msgs = 0
+    risk_found = 0
 
-                if not text or not emotion:
-                    continue
-
-                # 映射情绪到风险等级
-                risk = None
-                for key, val in emotion_to_risk.items():
-                    if key in str(emotion):
-                        risk = val
-                        break
-                if risk is None:
-                    continue
-
-                samples.append({
-                    "text": text[:500],  # 截断过长文本
-                    "label": risk,
-                    "source": "soulchat",
-                    "emotion": emotion,
-                })
-
-                if len(samples) >= max_samples:
-                    break
+    for fname in sorted(json_files):
         if len(samples) >= max_samples:
             break
+            
+        try:
+            with open(fname, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+        except (UnicodeDecodeError, PermissionError):
+            continue
 
-    print(f"[INFO] SoulChatCorpus: {len(samples)} emotion-mapped samples loaded")
+        if not content:
+            continue
+
+        # 尝试两种格式：JSONL（每行一个JSON）或单个大JSON数组
+        objects = []
+        
+        # 尝试JSONL
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                objects.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        
+        # 如果JSONL解析失败，尝试整体JSON
+        if not objects:
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, list):
+                    objects = parsed
+                elif isinstance(parsed, dict):
+                    objects = [parsed]
+            except json.JSONDecodeError:
+                continue
+
+        for obj in objects:
+            if len(samples) >= max_samples:
+                break
+            if not isinstance(obj, dict):
+                continue
+
+            # 提取 messages 字段
+            messages = obj.get("messages", obj.get("conversations", []))
+            if not messages:
+                continue
+
+            # 提取所有 user 消息
+            for msg in messages:
+                if len(samples) >= max_samples:
+                    break
+                role = msg.get("role", msg.get("from", ""))
+                if role not in ("user", "human"):
+                    continue
+                
+                text = msg.get("content", msg.get("value", ""))
+                if not text or len(text) < 5:  # 太短的跳过
+                    continue
+                
+                total_user_msgs += 1
+                text = text[:512]  # 截断
+                
+                # 用关键词判断风险等级
+                label = classify_text_by_keywords(text)
+                
+                # 只保留有风险的样本（label >= 1），避免大量label=0稀释
+                if label >= 1:
+                    risk_found += 1
+                    samples.append({
+                        "text": text,
+                        "label": label,
+                        "source": "soulchat",
+                    })
+                    
+                    # 同时加入一些无风险样本作为对比（每5个风险样本加1个无风险）
+                elif risk_found > 0 and risk_found % 5 == 0 and len(samples) < max_samples:
+                    samples.append({
+                        "text": text,
+                        "label": 0,
+                        "source": "soulchat",
+                    })
+
+    print(f"[INFO] SoulChatCorpus: scanned {total_user_msgs} user messages, "
+          f"found {risk_found} risk samples, total added: {len([s for s in samples if s['source']=='soulchat'])}")
     return samples
 
 
@@ -228,23 +262,19 @@ def load_soulchat_emotion(data_dir: Path, max_samples: int = 5000) -> list[dict]
 def clean_text(text: str) -> str:
     """基础文本清洗"""
     text = re.sub(r"\s+", " ", text).strip()
-    text = text[:512]  # BERT max_length 安全上限
+    text = text[:512]
     return text
 
 
 def deduplicate(samples: list[dict]) -> list[dict]:
-    """
-    基于文本内容去重。
-    当同一文本出现多次且标签不同时，保留较高风险标签（安全优先原则）。
-    """
-    seen = {}  # key -> (index, label)
+    """基于文本内容去重，保留更高风险标签"""
+    seen = {}
     unique = []
     for s in samples:
         key = s["text"].strip().lower()
         if not key:
             continue
         if key in seen:
-            # 保留更高风险标签
             prev_idx, prev_label = seen[key]
             if s["label"] > prev_label:
                 unique[prev_idx] = s
@@ -265,7 +295,6 @@ def split_dataset(samples: list[dict], train_ratio=0.8, val_ratio=0.1, seed=42):
     """分层抽样划分 train/val/test"""
     random.seed(seed)
 
-    # 按标签分组
     by_label = {}
     for s in samples:
         by_label.setdefault(s["label"], []).append(s)
@@ -291,7 +320,6 @@ def split_dataset(samples: list[dict], train_ratio=0.8, val_ratio=0.1, seed=42):
 # 保存
 # ============================================================
 def save_jsonl(samples: list[dict], filepath: Path):
-    """保存为 JSONL 格式（每行一个 JSON 对象）"""
     filepath.parent.mkdir(parents=True, exist_ok=True)
     with open(filepath, "w", encoding="utf-8") as f:
         for s in samples:
@@ -300,7 +328,6 @@ def save_jsonl(samples: list[dict], filepath: Path):
 
 
 def print_stats(name: str, samples: list[dict]):
-    """打印数据集统计"""
     counter = Counter(s["label"] for s in samples)
     total = len(samples)
     print(f"\n{'='*50}")
@@ -319,42 +346,38 @@ def print_stats(name: str, samples: list[dict]):
 # Main
 # ============================================================
 def main():
-    parser = argparse.ArgumentParser(description="BERT Risk Classification Data Preparation")
+    parser = argparse.ArgumentParser(description="BERT Risk Classification Data Preparation V2")
     parser.add_argument("--add-soulchat", action="store_true",
-                        help="Include SoulChatCorpus emotion-mapped samples")
+                        help="Include SoulChatCorpus samples (keyword-matched)")
     parser.add_argument("--soulchat-dir", type=str, default=None,
                         help="Path to SoulChatCorpus data directory")
+    parser.add_argument("--max-soulchat", type=int, default=5000,
+                        help="Max SoulChat samples to include")
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  BERT Risk Classification - Data Preparation")
+    print("  BERT Risk Classification - Data Preparation V2")
+    print("  (3-class: 无风险/轻度困扰/高风险)")
     print("=" * 60)
 
     # 1. 加载所有数据源
     all_samples = []
 
-    # PsyCrisis-Bench
     psycrisis_path = EVAL_DIR / "PsyCrisis-Bench.xlsx"
     all_samples.extend(load_psycrisis_bench(psycrisis_path))
 
-    # test_set.csv
     test_set_path = EVAL_DIR / "test_set.csv"
     all_samples.extend(load_test_set(test_set_path))
 
-    # 评测案例
-    eval_cases_path = EVAL_DIR / "risk_eval_cases.csv"
-    all_samples.extend(load_risk_eval_cases(eval_cases_path))
-
-    # SoulChatCorpus（可选）
     if args.add_soulchat:
         soulchat_dir = Path(args.soulchat_dir) if args.soulchat_dir else PROJECT_ROOT / "data" / "soulchat"
-        all_samples.extend(load_soulchat_emotion(soulchat_dir))
+        all_samples.extend(load_soulchat(soulchat_dir, max_samples=args.max_soulchat))
 
     # 2. 清洗 & 去重
     for s in all_samples:
         s["text"] = clean_text(s["text"])
-    all_samples = [s for s in all_samples if s["text"]]  # 去除空文本
+    all_samples = [s for s in all_samples if s["text"]]
     all_samples = deduplicate(all_samples)
 
     print(f"\n[INFO] Total samples after cleaning: {len(all_samples)}")
@@ -378,17 +401,16 @@ def main():
     save_jsonl(val, OUTPUT_DIR / "val.jsonl")
     save_jsonl(test, OUTPUT_DIR / "test.jsonl")
 
-    # 保存标签映射
     label_map = {str(k): v for k, v in LABEL_NAMES.items()}
     with open(OUTPUT_DIR / "label_map.json", "w", encoding="utf-8") as f:
         json.dump(label_map, f, ensure_ascii=False, indent=2)
-    print(f"\n[INFO] Label map saved -> {OUTPUT_DIR / 'label_map.json'}")
 
-    # 6. 类别权重计算（供训练脚本使用）
+    # 6. 类别权重
     train_labels = [s["label"] for s in train]
     counter = Counter(train_labels)
     total = len(train_labels)
-    weights = {label: round(total / (len(counter) * counter.get(label, 1)), 4)
+    num_classes = len(LABEL_NAMES)
+    weights = {label: round(total / (num_classes * counter.get(label, 1)), 4)
                for label in sorted(LABEL_NAMES.keys())}
     with open(OUTPUT_DIR / "class_weights.json", "w", encoding="utf-8") as f:
         json.dump(weights, f, indent=2)
@@ -396,6 +418,7 @@ def main():
 
     print("\n✅ Data preparation complete!")
     print(f"   Output directory: {OUTPUT_DIR}")
+    print(f"   Train: {len(train)}, Val: {len(val)}, Test: {len(test)}")
 
 
 if __name__ == "__main__":
