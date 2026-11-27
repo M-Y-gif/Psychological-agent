@@ -35,10 +35,20 @@ __pycache__/
 
 # 深度学习训练产物（太大，不上传GitHub）
 data/bert_risk/best_model/
+data/bert_risk/best_model_v2/
 data/bert_risk/*.jsonl
 data/fer_cnn/train/
 data/fer_cnn/val/
 data/fer_cnn/test/
 data/fer_cnn/best_model/
+data/fer_cnn/best_model_v2/
 data/fer_cnn/fer2013.csv
+data/soulchat/
 evaluation/figures/*.png
+
+# SoulChatCorpus 数据集（约 2GB）
+data/soulchat/
+
+# 临时文件
+/tmp/
+*.tar.gz

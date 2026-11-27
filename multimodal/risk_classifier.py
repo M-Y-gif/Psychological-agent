@@ -26,6 +26,10 @@ import json
 import os
 import sys
 
+# 离线模式：禁止访问HuggingFace网络，只用本地缓存
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import torch
 import torch.nn as nn
 from fastapi import FastAPI, Request
