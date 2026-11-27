@@ -1,8 +1,9 @@
 """
 多模态感知引擎（Python 微服务）
 - /api/stt     : Whisper 语音转写 + 韵律特征（语速、停顿）
-- /api/emotion : 人脸关键点 -> 表情特征
-   默认引擎 OpenCV DNN YuNet（纯 CPU，稳定）；
+- /api/emotion : 人脸检测 + 表情分类
+   默认引擎 opencv-yunet（纯 CPU，稳定，3类粗糙标签）；
+   可选 EMOTION_ENGINE=cnn（自训练 MobileNetV2，7类细粒度表情，需 PyTorch）；
    可选 EMOTION_ENGINE=mediapipe（MediaPipe FaceLandmarker 表情系数，需 GPU/Metal 环境）。
 - /api/tts     : edge-tts 语音合成（微软在线神经音色，需联网），结果缓存 7 天。
 Java 后端通过 HTTP 调用本服务，把情绪特征作为上下文参数传给大模型。
@@ -23,29 +24,88 @@ from faster_whisper import WhisperModel
 
 MODEL_SIZE = "small"                     # whisper 模型：tiny/base/small/medium
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
 YUNET_PATH = os.path.join(BASE_DIR, "models", "yunet.onnx")
 EMOTION_ENGINE = os.environ.get("EMOTION_ENGINE", "opencv").lower()
+# CNN 表情模型路径
+CNN_MODEL_DIR = os.path.join(PROJECT_ROOT, "data", "fer_cnn", "best_model_v2")
+if not os.path.exists(os.path.join(CNN_MODEL_DIR, "checkpoint.pt")):
+    CNN_MODEL_DIR = os.path.join(PROJECT_ROOT, "data", "fer_cnn", "best_model")
 # 微软语音服务器在国内网络可能无法直连：如本机有代理（如 Clash），设置 TTS_PROXY=http://127.0.0.1:7897
 TTS_PROXY = os.environ.get("TTS_PROXY", "")
 TTS_CACHE_DIR = os.path.join(BASE_DIR, "tts_cache")
 TTS_CACHE_DAYS = 7
 
+# CNN 表情标签（与训练时一致）
+CNN_LABEL_NAMES = ["angry", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
+CNN_PSY_MAP = {
+    "angry": "愤怒/烦躁", "disgust": "厌恶/排斥", "fear": "恐惧/焦虑",
+    "happy": "积极/愉悦", "sad": "悲伤/低落", "surprise": "惊讶/困惑", "neutral": "平静/中性",
+}
+
 app = FastAPI(title="心理 Agent 多模态感知引擎")
 whisper = None
 yunet = None
 face_mesh = None
+cnn_model = None
+cnn_device = None
 
 
 @app.on_event("startup")
 def load_models():
-    global whisper, yunet, face_mesh
+    global whisper, yunet, face_mesh, cnn_model, cnn_device
     whisper = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
     if EMOTION_ENGINE == "mediapipe":
         _load_mediapipe()
+    elif EMOTION_ENGINE == "cnn":
+        _load_cnn()
     else:
         yunet = cv2.FaceDetectorYN_create(YUNET_PATH, "", (320, 320), 0.6, 0.3, 5000)
     _clean_tts_cache()
     print(f"[multimodal] Whisper({MODEL_SIZE}) + 表情引擎({EMOTION_ENGINE}) 已加载")
+
+
+def _load_cnn():
+    """加载自训练的 MobileNetV2 CNN 表情分类模型"""
+    global cnn_model, cnn_device, yunet
+    try:
+        import torch
+        import torch.nn as nn
+        import torchvision.models as models
+
+        checkpoint_path = os.path.join(CNN_MODEL_DIR, "checkpoint.pt")
+        if not os.path.exists(checkpoint_path):
+            print(f"[WARN] CNN checkpoint not found at {checkpoint_path}, falling back to opencv-yunet")
+            yunet = cv2.FaceDetectorYN_create(YUNET_PATH, "", (320, 320), 0.6, 0.3, 5000)
+            return
+
+        cnn_device = "cuda" if torch.cuda.is_available() else "cpu"
+        checkpoint = torch.load(checkpoint_path, map_location=cnn_device)
+
+        # Build model (must match training script)
+        backbone = models.mobilenet_v2(weights=None)
+        in_features = backbone.classifier[1].in_features
+        backbone.classifier = nn.Sequential(
+            nn.Dropout(0.4),
+            nn.Linear(in_features, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(512, 7),
+        )
+        backbone.load_state_dict(checkpoint["model_state_dict"])
+        backbone.to(cnn_device)
+        backbone.eval()
+        cnn_model = backbone
+
+        # Still need YuNet for face detection (CNN only does classification)
+        yunet = cv2.FaceDetectorYN_create(YUNET_PATH, "", (320, 320), 0.6, 0.3, 5000)
+
+        print(f"[multimodal] CNN expression model loaded on {cnn_device} from {checkpoint_path}")
+        print(f"             Best Val F1: {checkpoint.get('val_f1', 'N/A')}")
+    except Exception as e:
+        print(f"[WARN] Failed to load CNN model: {e}, falling back to opencv-yunet")
+        yunet = cv2.FaceDetectorYN_create(YUNET_PATH, "", (320, 320), 0.6, 0.3, 5000)
 
 
 def _clean_tts_cache():
@@ -152,7 +212,85 @@ async def stt(request: Request):
     }
 
 
-# ==================== 表情：OpenCV YuNet 人脸关键点 ====================
+# ==================== 表情：CNN MobileNetV2（自训练，7类） ====================
+def _emotion_cnn(img):
+    """使用自训练的 MobileNetV2 CNN 进行 7 类表情分类。
+    仍用 YuNet 做人脸检测+裁剪，CNN 做表情分类。"""
+    import torch
+    import torchvision.transforms as transforms
+
+    if cnn_model is None or yunet is None:
+        return {"face_detected": False, "error": "CNN 模型未加载"}
+
+    h, w = img.shape[:2]
+    yunet.setInputSize((w, h))
+    ok, faces = yunet.detect(img)
+    if not ok or faces is None or len(faces) == 0:
+        return {"face_detected": False, "error": "未检测到人脸"}
+
+    # 裁剪人脸区域（稍微扩大边界以包含完整面部）
+    f = faces[0]
+    x, y, fw, fh = int(f[0]), int(f[1]), int(f[2]), int(f[3])
+    pad = 0.2
+    x1 = max(0, int(x - fw * pad))
+    y1 = max(0, int(y - fh * pad))
+    x2 = min(w, int(x + fw * (1 + pad)))
+    y2 = min(h, int(y + fh * (1 + pad)))
+    face_crop = img[y1:y2, x1:x2]
+
+    if face_crop.size == 0:
+        return {"face_detected": False, "error": "人脸裁剪失败"}
+
+    # 预处理：BGR→RGB → PIL → transforms
+    from PIL import Image
+    face_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(face_rgb)
+
+    transform = transforms.Compose([
+        transforms.Grayscale(num_output_channels=3),
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
+    tensor = transform(pil_img).unsqueeze(0).to(cnn_device)
+
+    with torch.no_grad():
+        logits = cnn_model(tensor)
+        probs = torch.softmax(logits, dim=-1)[0].cpu().tolist()
+        pred_idx = int(torch.argmax(logits, dim=-1).item())
+
+    label_en = CNN_LABEL_NAMES[pred_idx]
+    label_psy = CNN_PSY_MAP.get(label_en, label_en)
+    confidence = probs[pred_idx]
+
+    # 同时计算微笑分数（兼容原有接口）
+    smile_score = probs[CNN_LABEL_NAMES.index("happy")] if "happy" in CNN_LABEL_NAMES else 0.0
+
+    # 头部倾斜（仍用 YuNet 关键点）
+    re_x, re_y = f[4], f[5]
+    le_x, le_y = f[6], f[7]
+    tilt_deg = math.degrees(math.atan2(re_y - le_y, re_x - le_x))
+
+    return {
+        "face_detected": True,
+        "engine": "cnn-mobilenetv2",
+        "emotion_label": label_psy,
+        "emotion_label_en": label_en,
+        "confidence": round(confidence, 3),
+        "smile_score": round(smile_score, 3),
+        "head_tilt_deg": round(float(tilt_deg), 2),
+        "face_score": round(float(f[14]), 3),
+        "probabilities": {CNN_LABEL_NAMES[i]: round(probs[i], 3) for i in range(len(CNN_LABEL_NAMES))},
+        "features_json": json.dumps({
+            "表情": label_psy,
+            "置信度": round(confidence, 2),
+            "头部倾斜(度)": round(float(tilt_deg), 1),
+        }, ensure_ascii=False),
+    }
+
+
+# ==================== 表情：OpenCV YuNet 人脸关键点（原始规则方案，保留作为fallback） ====================
 def _emotion_opencv(img):
     h, w = img.shape[:2]
     yunet.setInputSize((w, h))
@@ -244,7 +382,9 @@ async def emotion(request: Request):
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         return {"face_detected": False, "error": "无法解码图片"}
-    if EMOTION_ENGINE == "mediapipe":
+    if EMOTION_ENGINE == "cnn":
+        return _emotion_cnn(img)
+    elif EMOTION_ENGINE == "mediapipe":
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         return _emotion_mediapipe(rgb)
     return _emotion_opencv(img)

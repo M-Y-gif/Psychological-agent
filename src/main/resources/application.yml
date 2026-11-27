@@ -57,6 +57,10 @@ psy:
     base-url: ${MULTIMODAL_BASE_URL:http://localhost:8090}
     enabled: true
 
+  bert-classifier:
+    base-url: ${BERT_CLASSIFIER_BASE_URL:http://localhost:8091}
+    enabled: ${BERT_CLASSIFIER_ENABLED:true}   # 设为 false 可关闭 BERT 层（服务未启动时自动降级）
+
   warning:
     mail-enabled: ${WARNING_MAIL_ENABLED:false}   # true 时走真实 SMTP（需配 spring.mail.*）
     mail-to: ${WARNING_MAIL_TO:consultant@example.com}

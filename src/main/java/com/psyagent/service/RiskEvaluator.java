@@ -6,13 +6,23 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.Set;
 
 /**
- * 心理风险判定器：规则层 + 语义层（LLM）混合，最终取两者较大值。
+ * 心理风险判定器：规则层 + 语义层（LLM）+ BERT层 三重混合，最终取三者较大值。
  * 被 Agent 工具 evaluate_risk_level 与评测模块共用，保证线上行为与评测一致。
+ *
+ * V2改进：新增BERT分类器调用（自训练bert-base-chinese微调模型），
+ * 通过HTTP调用本地FastAPI微服务（默认8091端口），与规则层和LLM层取max。
  */
 @Service
 public class RiskEvaluator {
@@ -30,12 +40,23 @@ public class RiskEvaluator {
             "绝望", "崩溃", "撑不下去", "撑不住", "受不了", "毫无希望", "没有希望",
             "无意义", "空虚", "无助", "痛苦");
 
-    /** 评测结果 */
-    public record RiskResult(int level, String reason, int ruleLevel, int llmLevel, String llmReason) {
+    /** 评测结果（新增 bertLevel 字段） */
+    public record RiskResult(int level, String reason, int ruleLevel, int llmLevel, String llmReason,
+                             int bertLevel, String bertReason) {
+        /** 向后兼容的构造器 */
+        public RiskResult(int level, String reason, int ruleLevel, int llmLevel, String llmReason) {
+            this(level, reason, ruleLevel, llmLevel, llmReason, -1, "");
+        }
     }
 
     private final ChatClient riskChatClient;
     private final ObjectMapper objectMapper;
+
+    @Value("${psy.bert-classifier.base-url:http://localhost:8091}")
+    private String bertBaseUrl;
+
+    @Value("${psy.bert-classifier.enabled:true}")
+    private boolean bertEnabled;
 
     public RiskEvaluator(ChatModel chatModel, ObjectMapper objectMapper) {
         // 独立 ChatClient（不带工具，避免递归调用）
@@ -49,15 +70,37 @@ public class RiskEvaluator {
 
     /**
      * 综合研判：文本 + 可选的多模态情绪特征（语速、停顿、表情等）。
+     * V2: 规则层 + LLM层 + BERT层 三重取max。
      */
     public RiskResult evaluate(String message, String emotionContext) {
         String text = message == null ? "" : message;
         int ruleLevel = ruleScore(text);
         String llmJson = llmScore(text, emotionContext);
         int llmLevel = parseRiskLevel(llmJson);
+
+        // BERT 分类器调用
+        int bertLevel = -1;
+        String bertReason = "";
+        if (bertEnabled) {
+            Map<String, Object> bertResult = bertScore(text);
+            if (bertResult != null) {
+                int rawLevel = ((Number) bertResult.getOrDefault("risk_level", -1)).intValue();
+                double confidence = ((Number) bertResult.getOrDefault("confidence", 0.0)).doubleValue();
+                String label = String.valueOf(bertResult.getOrDefault("label", ""));
+                if (rawLevel >= 0) {
+                    // BERT输出3类(0-2)，映射到原4级体系：0→0, 1→1, 2→2
+                    bertLevel = Math.min(rawLevel, 2);
+                    bertReason = "BERT:" + label + "(置信度" + String.format("%.0f%%", confidence * 100) + ")";
+                }
+            }
+        }
+
         int finalLevel = Math.max(ruleLevel, llmLevel);
-        String reason = buildReason(ruleLevel, llmJson);
-        return new RiskResult(finalLevel, reason, ruleLevel, llmLevel, extractReason(llmJson));
+        if (bertLevel >= 0) {
+            finalLevel = Math.max(finalLevel, bertLevel);
+        }
+        String reason = buildReason(ruleLevel, llmJson, bertLevel, bertReason);
+        return new RiskResult(finalLevel, reason, ruleLevel, llmLevel, extractReason(llmJson), bertLevel, bertReason);
     }
 
     /** 仅规则层（评测对照组用） */
@@ -120,9 +163,49 @@ public class RiskEvaluator {
         return (node != null && node.hasNonNull("reasons")) ? node.path("reasons").asText() : "";
     }
 
-    private String buildReason(int ruleLevel, String llmJson) {
+    private String buildReason(int ruleLevel, String llmJson, int bertLevel, String bertReason) {
         String llmReason = extractReason(llmJson);
-        return "规则：" + ruleText(ruleLevel) + "；语义分析：" + (llmReason.isEmpty() ? "未获得" : llmReason);
+        StringBuilder sb = new StringBuilder();
+        sb.append("规则：").append(ruleText(ruleLevel));
+        sb.append("；语义分析：").append(llmReason.isEmpty() ? "未获得" : llmReason);
+        if (bertLevel >= 0) {
+            sb.append("；").append(bertReason);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 调用 BERT 风险分类微服务（FastAPI, 默认8091端口）。
+     * 失败时返回 null，不影响其他两层判定。
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> bertScore(String text) {
+        try {
+            String base = bertBaseUrl.replaceAll("/+$", "");
+            HttpURLConnection conn = (HttpURLConnection) URI.create(base + "/api/risk_classify").toURL().openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(5000);
+
+            String body = objectMapper.writeValueAsString(Map.of("text", text));
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(body.getBytes(StandardCharsets.UTF_8));
+            }
+
+            int code = conn.getResponseCode();
+            InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            String json = new String(stream == null ? new byte[0] : stream.readAllBytes(), StandardCharsets.UTF_8);
+            if (code >= 400) {
+                log.warn("BERT 风险分类返回 {}: {}", code, json);
+                return null;
+            }
+            return objectMapper.readValue(json, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        } catch (Exception e) {
+            log.debug("BERT 风险分类调用失败（服务可能未启动）：{}", e.getMessage());
+            return null;
+        }
     }
 
     private static String ruleText(int ruleLevel) {
